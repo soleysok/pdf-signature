@@ -18,13 +18,35 @@ function newId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-export function SignStudio() {
+const MARKS_KEY = "bindery.signatures.v1";
+
+function loadSavedMarks(): SavedMark[] {
+  try {
+    const raw = localStorage.getItem(MARKS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as SavedMark[];
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item) => item && typeof item.dataUrl === "string" && item.dataUrl.startsWith("data:image/"))
+      .slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+export function SignStudio({
+  initialFile,
+  onConsumed,
+}: {
+  initialFile?: File | null;
+  onConsumed?: () => void;
+} = {}) {
   const [file, setFile] = useState<File | null>(null);
   const [page, setPage] = useState<PagePreview | null>(null);
   const [pageCount, setPageCount] = useState(0);
   const [pageIndex, setPageIndex] = useState(0);
   const [stamps, setStamps] = useState<Stamp[]>([]);
-  const [marks, setMarks] = useState<SavedMark[]>([]);
+  const [marks, setMarks] = useState<SavedMark[]>(() => loadSavedMarks());
   const [activeMark, setActiveMark] = useState<string | null>(null);
   const [placeMode, setPlaceMode] = useState<"image" | "text" | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -39,6 +61,8 @@ export function SignStudio() {
   const pdfInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
   const sessionRef = useRef<PreviewSession | null>(null);
+  const onConsumedRef = useRef(onConsumed);
+  onConsumedRef.current = onConsumed;
 
   const showPage = useCallback(async (index: number) => {
     const session = sessionRef.current;
@@ -84,6 +108,19 @@ export function SignStudio() {
       void sessionRef.current?.close();
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(MARKS_KEY, JSON.stringify(marks.slice(0, 12)));
+    } catch {
+      /* quota or private mode */
+    }
+  }, [marks]);
+
+  useEffect(() => {
+    if (!initialFile) return;
+    void loadPdf(initialFile).finally(() => onConsumedRef.current?.());
+  }, [initialFile, loadPdf]);
 
   async function onPdfFiles(list: FileList | File[]) {
     const pdf = Array.from(list).find(
@@ -150,7 +187,6 @@ export function SignStudio() {
     };
     setStamps((prev) => [...prev, stamp]);
     setSelected(stamp.id);
-    setPlaceMode(null);
   }
 
   function pageCoords(event: React.PointerEvent | React.MouseEvent, el: HTMLElement) {
