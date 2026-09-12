@@ -1,0 +1,81 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #efeae2;
+  --color-bg-deep: #e4ddd3;
+  --color-surface: #f7f3ec;
+  --color-surface-2: #fffdf8;
+  --color-ink: #1a1814;
+  --color-ink-soft: #3d3933;
+  --color-muted: #6f6a62;
+  --color-faint: #938d84;
+  --color-line: #d7d0c6;
+  --color-line-strong: #c4bbad;
+  --color-accent: #2c4a3d;
+  --color-accent-fg: #f4efe6;
+  --color-good: #2f5d3f;
+  --color-warn: #8a4b1f;
+  --color-danger: #8a2e24;
+
+  --font-display: "Fraunces", "Iowan Old Style", "Palatino Linotype", serif;
+  --font-sans: "Figtree", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+
+  --radius-xs: 4px;
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --radius-xl: 28px;
+
+  --shadow-sheet: 0 1px 0 rgba(26, 24, 20, 0.04), 0 18px 40px -24px rgba(26, 24, 20, 0.28);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background: var(--color-bg);
+    color: var(--color-ink);
+  }
+
+  body {
+    min-height: 100dvh;
+    font-family: var(--font-sans);
+    background:
+      radial-gradient(1200px 480px at 10% -10%, rgba(44, 74, 61, 0.06), transparent 55%),
+      var(--color-bg);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  h1,
+  h2,
+  h3 {
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+}
+
+.sign-pad,
+.sign-pad * {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
