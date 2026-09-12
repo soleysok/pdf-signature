@@ -1,6 +1,7 @@
-import { PDFDocument } from "pdf-lib";
 import type { PDFDocumentProxy } from "pdfjs-dist";
+import { friendlyPdfError } from "./errors";
 import { ensureFont, type TextRun } from "./fonts";
+import { loadPdfDocument } from "./load";
 import { fitScale, openPdfFile, yieldToUi } from "./pdfjs-host";
 
 export type PagePreview = {
@@ -54,44 +55,69 @@ function isPng(dataUrl: string) {
   return dataUrl.startsWith("data:image/png");
 }
 
-async function renderTextPng(
-  stamp: TextStamp,
-  widthPx: number,
-  heightPx: number,
-  pageHeightPx: number,
-): Promise<Uint8Array> {
+function containRect(boxW: number, boxH: number, imageW: number, imageH: number) {
+  const imageAspect = imageW / Math.max(1, imageH);
+  const boxAspect = boxW / Math.max(0.01, boxH);
+  if (imageAspect > boxAspect) {
+    const height = boxW / imageAspect;
+    return { width: boxW, height, x: 0, y: (boxH - height) / 2 };
+  }
+  const width = boxH * imageAspect;
+  return { width, height: boxH, x: (boxW - width) / 2, y: 0 };
+}
+
+async function renderTextPng(stamp: TextStamp, pageWidthPt: number, pageHeightPt: number): Promise<Uint8Array> {
   const font = await ensureFont(stamp.fontId);
   const scale = 3;
   const canvas = document.createElement("canvas");
-  canvas.width = Math.max(8, Math.round(widthPx * scale));
-  canvas.height = Math.max(8, Math.round(heightPx * scale));
+  canvas.width = Math.max(8, Math.round(stamp.w * pageWidthPt * scale));
+  canvas.height = Math.max(8, Math.round(stamp.h * pageHeightPt * scale));
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas is not available in this browser.");
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.textBaseline = "top";
-  const align = stamp.align || "left";
   ctx.textAlign = "left";
-  const fontPx = Math.max(8, stamp.fontSize * pageHeightPx * scale);
+  const align = stamp.align || "left";
+  const khmer = stamp.fontId !== "lettering";
+  const fontPx = Math.max(8, stamp.fontSize * pageHeightPt * scale * (khmer ? 0.78 : 1));
   ctx.font = `${fontPx}px ${font.css}`;
 
-  const pad = canvas.width * 0.04;
-  const y = canvas.height * 0.12;
-  const line = stamp.runs.map((run) => run.text).join("");
-  const total = ctx.measureText(line).width;
-  let x =
-    align === "center" ? (canvas.width - total) / 2 : align === "right" ? canvas.width - pad - total : pad;
-
-  for (const run of stamp.runs) {
-    if (!run.text) continue;
-    ctx.fillStyle = run.color || "#1a1814";
-    ctx.fillText(run.text, x, y);
-    x += ctx.measureText(run.text).width;
-  }
+  const pad = 4 * scale;
+  const lineHeight = fontPx * 1.15;
+  splitRunsByLine(stamp.runs).forEach((lineRuns, lineIndex) => {
+    const line = lineRuns.map((run) => run.text).join("");
+    const total = ctx.measureText(line).width;
+    let x =
+      align === "center"
+        ? (canvas.width - total) / 2
+        : align === "right"
+          ? canvas.width - pad - total
+          : pad;
+    const y = pad + lineIndex * lineHeight;
+    for (const run of lineRuns) {
+      if (!run.text) continue;
+      ctx.fillStyle = run.color || "#1a1814";
+      ctx.fillText(run.text, x, y);
+      x += ctx.measureText(run.text).width;
+    }
+  });
 
   const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob((next) => (next ? resolve(next) : reject(new Error("Could not render text."))), "image/png");
   });
   return new Uint8Array(await blob.arrayBuffer());
+}
+
+function splitRunsByLine(runs: TextRun[]): TextRun[][] {
+  const lines: TextRun[][] = [[]];
+  for (const run of runs) {
+    const parts = run.text.split("\n");
+    parts.forEach((part, index) => {
+      if (index > 0) lines.push([]);
+      if (part) lines[lines.length - 1].push({ text: part, color: run.color });
+    });
+  }
+  return lines;
 }
 
 async function renderOnePage(
@@ -134,7 +160,13 @@ async function renderOnePage(
 
 export async function openPreviewSession(file: File): Promise<PreviewSession> {
   const maxPixels = file.size >= 350 * 1024 * 1024 ? 900_000 : file.size >= 80 * 1024 * 1024 ? 1_400_000 : 2_200_000;
-  const { pdf, close } = await openPdfFile(file);
+  let opened;
+  try {
+    opened = await openPdfFile(file);
+  } catch (err) {
+    throw new Error(friendlyPdfError(err, "Could not read that PDF."));
+  }
+  const { pdf, close } = opened;
   const cache = new Map<number, PagePreview>();
 
   return {
@@ -164,35 +196,40 @@ export async function openPreviewSession(file: File): Promise<PreviewSession> {
 }
 
 export async function applyStamps(file: File, stamps: Stamp[]): Promise<Uint8Array> {
-  const bytes = await file.arrayBuffer();
-  const doc = await PDFDocument.load(bytes, { ignoreEncryption: true });
-  const pages = doc.getPages();
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const doc = await loadPdfDocument(bytes);
+    const pages = doc.getPages();
 
-  for (const stamp of stamps) {
-    const page = pages[stamp.pageIndex];
-    if (!page) continue;
-    const { width, height } = page.getSize();
-    const drawW = stamp.w * width;
-    const drawH = stamp.h * height;
-    const x = stamp.x * width;
-    const y = height - stamp.y * height - drawH;
+    for (const stamp of stamps) {
+      const page = pages[stamp.pageIndex];
+      if (!page) continue;
+      const { width, height } = page.getSize();
+      const drawW = stamp.w * width;
+      const drawH = stamp.h * height;
+      const x = stamp.x * width;
+      const y = height - stamp.y * height - drawH;
 
-    if (stamp.type === "image") {
-      const raw = await dataUrlToBytes(stamp.dataUrl);
-      const image = isPng(stamp.dataUrl) ? await doc.embedPng(raw) : await doc.embedJpg(raw);
-      page.drawImage(image, { x, y, width: drawW, height: drawH });
-    } else {
-      const png = await renderTextPng(
-        stamp,
-        Math.max(48, drawW * 2.4),
-        Math.max(24, drawH * 2.4),
-        height * 2.4,
-      );
-      const image = await doc.embedPng(png);
-      page.drawImage(image, { x, y, width: drawW, height: drawH });
+      if (stamp.type === "image") {
+        const raw = await dataUrlToBytes(stamp.dataUrl);
+        const image = isPng(stamp.dataUrl) || raw[0] === 0x89 ? await doc.embedPng(raw) : await doc.embedJpg(raw);
+        const fit = containRect(drawW, drawH, image.width, image.height);
+        page.drawImage(image, {
+          x: x + fit.x,
+          y: y + fit.y,
+          width: fit.width,
+          height: fit.height,
+        });
+      } else {
+        const png = await renderTextPng(stamp, width, height);
+        const image = await doc.embedPng(png);
+        page.drawImage(image, { x, y, width: drawW, height: drawH });
+      }
+      await yieldToUi();
     }
-    await yieldToUi();
-  }
 
-  return doc.save({ useObjectStreams: true });
+    return doc.save({ useObjectStreams: true });
+  } catch (err) {
+    throw new Error(friendlyPdfError(err, err instanceof Error ? err.message : "Could not export the signed PDF."));
+  }
 }

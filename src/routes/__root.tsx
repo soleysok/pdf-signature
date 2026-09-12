@@ -13,7 +13,7 @@ export const Route = createRootRoute({
       { title: APP_NAME },
       {
         name: "description",
-        content: "Merge and compress PDFs in the browser. Files never leave your device.",
+        content: "Merge, compress, or sign PDFs in the browser. Files never leave your device.",
       },
       { name: "theme-color", content: "#1A1814" },
     ],

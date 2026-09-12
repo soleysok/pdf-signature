@@ -13,6 +13,9 @@ import {
   Trash2,
 } from "lucide-react";
 import { SignStudio } from "@/components/sign-studio";
+import type { CompressStrategy } from "@/lib/pdf/compress-policy";
+import { friendlyPdfError } from "@/lib/pdf/errors";
+import { bytesToFile } from "@/lib/pdf/load";
 import { cn, downloadBlob, formatBytes } from "@/lib/utils";
 import {
   COMPRESS_PRESETS,
@@ -43,7 +46,10 @@ export function BinderyApp() {
     bytes: Uint8Array;
     name: string;
     sourceSize: number;
+    strategy?: CompressStrategy;
+    pageCount?: number;
   } | null>(null);
+  const [signFile, setSignFile] = useState<File | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -104,10 +110,12 @@ export function BinderyApp() {
           setItems((prev) =>
             prev.map((row) => (row.id === item.id ? { ...row, pages } : row)),
           );
-        } catch {
+        } catch (err) {
           setItems((prev) =>
             prev.map((row) =>
-              row.id === item.id ? { ...row, error: "Could not read this PDF." } : row,
+              row.id === item.id
+                ? { ...row, error: friendlyPdfError(err, "Could not read this PDF.") }
+                : row,
             ),
           );
         }
@@ -152,14 +160,16 @@ export function BinderyApp() {
     setResult(null);
     try {
       const { mergePdfs } = await import("@/lib/pdf/merge");
-      const bytes = await mergePdfs(
+      const merged = await mergePdfs(
         items.map((item) => item.file),
         (current, total, label) => setProgress({ current, total, label }),
       );
+      const first = items[0]?.name.replace(/\.pdf$/i, "") || "merged";
       setResult({
-        bytes,
-        name: "merged.pdf",
+        bytes: merged.bytes,
+        name: items.length === 2 ? `${first}-merged.pdf` : "merged.pdf",
         sourceSize: totalSize,
+        pageCount: merged.pageCount,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Merge failed.");
@@ -181,14 +191,15 @@ export function BinderyApp() {
       const { compressPdf } = await import("@/lib/pdf/compress");
       if (items.length === 1) {
         const item = items[0];
-        const bytes = await compressPdf(item.file, preset, (current, total, label) =>
+        const compressed = await compressPdf(item.file, preset, (current, total, label) =>
           setProgress({ current, total, label }),
         );
         const base = item.name.replace(/\.pdf$/i, "");
         setResult({
-          bytes,
-          name: `${base}-compressed.pdf`,
+          bytes: compressed.bytes,
+          name: compressed.strategy === "original" ? item.name : `${base}-compressed.pdf`,
           sourceSize: item.size,
+          strategy: compressed.strategy,
         });
         return;
       }
@@ -197,18 +208,16 @@ export function BinderyApp() {
       const merged = await mergePdfs(items.map((item) => item.file), (current, total, label) =>
         setProgress({ current, total, label: `Merge · ${label}` }),
       );
-      const mergedCopy = new Uint8Array(merged.byteLength);
-      mergedCopy.set(merged);
-      const mergedFile = new File([mergedCopy], "merged.pdf", {
-        type: "application/pdf",
-      });
-      const bytes = await compressPdf(mergedFile, preset, (current, total, label) =>
+      const mergedFile = bytesToFile(merged.bytes, "merged.pdf");
+      const compressed = await compressPdf(mergedFile, preset, (current, total, label) =>
         setProgress({ current, total, label }),
       );
       setResult({
-        bytes,
+        bytes: compressed.bytes,
         name: "merged-compressed.pdf",
         sourceSize: totalSize,
+        strategy: compressed.strategy,
+        pageCount: merged.pageCount,
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Compression failed.");
@@ -276,7 +285,7 @@ export function BinderyApp() {
 
       {mode === "sign" ? (
         <>
-          <SignStudio />
+          <SignStudio initialFile={signFile} onConsumed={() => setSignFile(null)} />
           <footer className="mt-auto flex items-center gap-2 pt-10 text-xs text-faint">
             <Lock className="size-3.5" strokeWidth={1.75} />
             Processed in your browser. Nothing is stored on a server.
@@ -413,8 +422,8 @@ export function BinderyApp() {
             })}
           </div>
           <p className="mt-3 text-xs leading-relaxed text-muted">
-            Compression rebuilds pages as high-resolution images so huge photo scans drop in size
-            without a visible quality jump. Text stays readable; it will no longer be selectable.
+            Photo scans are flattened to images. Text PDFs are optimized without flattening, so
+            type stays selectable — and the file never comes out larger than it started.
           </p>
         </fieldset>
       ) : (
@@ -465,7 +474,17 @@ export function BinderyApp() {
           <p className="mt-1 font-mono text-xs text-muted tabular-nums">
             {formatBytes(result.sourceSize)} → {formatBytes(result.bytes.byteLength)}
             {saved > 0.02 ? ` · saved ${Math.round(saved * 100)}%` : ""}
+            {result.pageCount ? ` · ${result.pageCount} pages` : ""}
           </p>
+          {result.strategy ? (
+            <p className="mt-2 text-xs leading-relaxed text-ink-soft">
+              {result.strategy === "original"
+                ? "This file was already compact. Flattening the pages would have made it larger, so Bindery kept the original."
+                : result.strategy === "lossless"
+                  ? "Optimized the PDF structure without flattening pages, so text stays selectable."
+                  : "Rebuilt pages as images to shrink a scan. Text will no longer be selectable."}
+            </p>
+          ) : null}
           <button
             type="button"
             onClick={() => downloadBlob(result.bytes, result.name)}
@@ -474,13 +493,51 @@ export function BinderyApp() {
             <Download className="size-4" />
             Download {result.name}
           </button>
-          <button
-            type="button"
-            onClick={() => setResult(null)}
-            className="mt-2 inline-flex min-h-12 w-full items-center justify-center rounded-md border border-line bg-surface text-sm font-medium text-ink"
-          >
-            Discard
-          </button>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {mode === "merge" ? (
+              <button
+                type="button"
+                onClick={() => {
+                  const file = bytesToFile(result.bytes, result.name);
+                  setItems([
+                    {
+                      id: newId(),
+                      file,
+                      name: file.name,
+                      size: file.size,
+                      pages: result.pageCount ?? null,
+                    },
+                  ]);
+                  setMode("compress");
+                  setResult(null);
+                  setError(null);
+                }}
+                className="inline-flex min-h-12 items-center justify-center rounded-md border border-line bg-surface text-sm font-medium text-ink"
+              >
+                Compress this
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setResult(null)}
+                className="inline-flex min-h-12 items-center justify-center rounded-md border border-line bg-surface text-sm font-medium text-ink"
+              >
+                Discard
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setSignFile(bytesToFile(result.bytes, result.name));
+                setMode("sign");
+                setResult(null);
+                setError(null);
+              }}
+              className="inline-flex min-h-12 items-center justify-center rounded-md border border-line bg-surface text-sm font-medium text-ink"
+            >
+              Sign this
+            </button>
+          </div>
         </section>
       ) : null}
 
